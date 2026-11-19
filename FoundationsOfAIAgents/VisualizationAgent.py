@@ -1,408 +1,162 @@
 import os
-
-# Force Ollama to use CPU
-os.environ["OLLAMA_LLM_LIBRARY"] = "cpu"
-
-import streamlit as st
-import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import seaborn as sns
+import pandas as pd
+import streamlit as st
 
+# Force Ollama to use CPU to prevent CUDA crashes on Windows
+os.environ.setdefault("OLLAMA_LLM_LIBRARY", "cpu")
+
+from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
 from langchain_ollama import ChatOllama
-from langchain_experimental.agents.agent_toolkits import (
-    create_pandas_dataframe_agent
-)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-# ============================================================
-# 1. STREAMLIT CONFIGURATION
-# ============================================================
-
-st.set_page_config(
-    page_title="AI Visualization Agent",
-    page_icon="📊",
-    layout="wide"
-)
-
-
-# ============================================================
-# 2. PAGE TITLE
-# ============================================================
-
+# 1. Streamlit Configuration & Header
+st.set_page_config(page_title="AI Visualization Agent", page_icon="📊", layout="wide")
 st.title("📊 AI Data Visualization Agent")
-
 st.write(
-    "Upload a CSV file and ask questions about your data "
-    "using natural language. The local Llama model can "
-    "analyze the data and create visualizations."
+    "Analyze CSV datasets and generate charts using natural language with a local Llama model."
 )
 
 
-# ============================================================
-# 3. CSV UPLOAD
-# ============================================================
-
-uploaded_file = st.file_uploader(
-    "Upload your CSV file",
-    type=["csv"]
-)
-
-
-# ============================================================
-# 4. STOP IF NO FILE
-# ============================================================
-
-if uploaded_file is None:
-
-    st.info(
-        "Please upload a CSV file to start."
+# 2. Dataset Selection (Bundled CSV or Upload)
+col_mode, col_sel = st.columns([1, 2])
+with col_mode:
+    source_choice = st.radio(
+        "Dataset Source:",
+        ["Bundled Dataset", "Upload CSV"],
+        horizontal=True,
     )
 
-    st.stop()
+df = None
+dataset_name = ""
+
+if source_choice == "Bundled Dataset":
+    bundled_files = ["classification-dataset.csv", "regression-dataset.csv"]
+    with col_sel:
+        selected_file = st.selectbox("Select bundled dataset:", bundled_files)
+    dataset_name = selected_file
+    file_path = os.path.join(BASE_DIR, selected_file)
+    if os.path.exists(file_path):
+        df = pd.read_csv(file_path)
+    else:
+        st.error(f"File not found: {file_path}")
+        st.stop()
+else:
+    with col_sel:
+        uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
+    if uploaded_file is None:
+        st.info("Please upload a CSV file to start.")
+        st.stop()
+    dataset_name = uploaded_file.name
+    try:
+        df = pd.read_csv(uploaded_file)
+    except Exception as e:
+        st.error(f"Could not read the CSV file:\n\n{e}")
+        st.stop()
 
 
-# ============================================================
-# 5. LOAD DATASET
-# ============================================================
-
-try:
-
-    df = pd.read_csv(uploaded_file)
-
-except Exception as e:
-
-    st.error(
-        f"Could not read the CSV file:\n\n{e}"
-    )
-
-    st.stop()
-
-
-# ============================================================
-# 6. DATASET INFORMATION
-# ============================================================
-
-st.subheader("Dataset")
-
+# 3. Dataset Overview
+st.subheader(f"Dataset: {dataset_name}")
 col1, col2, col3 = st.columns(3)
-
 with col1:
-    st.metric(
-        "Rows",
-        df.shape[0]
-    )
-
+    st.metric("Rows", df.shape[0])
 with col2:
-    st.metric(
-        "Columns",
-        df.shape[1]
-    )
-
+    st.metric("Columns", df.shape[1])
 with col3:
-    st.metric(
-        "Missing Values",
-        int(df.isnull().sum().sum())
-    )
-
-
-# ============================================================
-# 7. SHOW DATA
-# ============================================================
+    st.metric("Missing Values", int(df.isnull().sum().sum()))
 
 with st.expander("Preview Dataset"):
-
-    st.dataframe(
-        df.head(10),
-        use_container_width=True
-    )
-
+    st.dataframe(df.head(10), use_container_width=True)
 
 with st.expander("Column Information"):
-
     info_df = pd.DataFrame({
         "Column": df.columns,
         "Data Type": df.dtypes.astype(str),
-        "Missing Values": df.isnull().sum().values
+        "Missing Values": df.isnull().sum().values,
     })
-
-    st.dataframe(
-        info_df,
-        use_container_width=True
-    )
+    st.dataframe(info_df, use_container_width=True)
 
 
-# ============================================================
-# 8. LOCAL OLLAMA MODEL
-# ============================================================
+# 4. Agent Setup
+llm = ChatOllama(model="llama3.1:8b", temperature=0)
 
-llm = ChatOllama(
-    model="llama3.1:8b",
-    temperature=0
-)
-
-
-# ============================================================
-# 9. CREATE PANDAS DATAFRAME AGENT
-# ============================================================
-
-agent = create_pandas_dataframe_agent(
-
-    llm=llm,
-
-    df=df,
-
-    verbose=False,
-
-    # Allows the agent to execute Python code
-    allow_dangerous_code=True,
-
-    # Return the intermediate steps so that
-    # we can inspect the generated Python code
-    return_intermediate_steps=True,
-
-    # Helps recover from parsing problems
-    handle_parsing_errors=True,
-
-    prefix="""
-You are an expert data analyst.
-
-You are working with a pandas DataFrame called df.
-
-Your job is to answer questions about the dataset.
+agent_prefix = """
+You are an expert data analyst working with a pandas DataFrame called df.
+Your job is to answer questions about the dataset accurately.
 
 When the user asks for a visualization:
+1. Identify the relevant columns from df (use actual column names, do not invent them).
+2. Write clean Python code using pandas, matplotlib, or seaborn.
+3. Make charts readable with a meaningful title, axis labels, and appropriate figure size.
+4. Always execute the code to generate the figure.
+5. Provide a short explanation of what the chart shows.
 
-1. Analyze the requested columns.
-2. Write Python code using pandas and matplotlib or seaborn.
-3. Execute the code.
-4. Create the requested chart.
-5. Give a short explanation of the result.
-
-Use the actual column names from the DataFrame.
-
-Do not invent columns.
-
-For visualizations, use matplotlib or seaborn.
-
-Always make the chart readable with:
-- meaningful title
-- axis labels
-- appropriate figure size
-
-The user may request:
-- bar charts
-- line charts
-- pie charts
-- scatter plots
-- box plots
-- histograms
-- heatmaps
-
-You can also answer normal questions about the dataset.
+Available chart types include bar charts, line charts, scatter plots, histograms, box plots, heatmaps, and pie charts.
+You can also answer direct statistical or summary questions about the dataset.
 """
+
+agent = create_pandas_dataframe_agent(
+    llm=llm,
+    df=df,
+    verbose=False,
+    allow_dangerous_code=True,
+    return_intermediate_steps=True,
+    agent_executor_kwargs={"handle_parsing_errors": True},
+    prefix=agent_prefix,
 )
 
 
-# ============================================================
-# 10. SESSION STATE
-# ============================================================
-
+# 5. Chat History & User Interaction
 if "chat_history" not in st.session_state:
-
     st.session_state.chat_history = []
 
-
-# ============================================================
-# 11. DISPLAY PREVIOUS QUESTIONS
-# ============================================================
-
 for message in st.session_state.chat_history:
-
     with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-        st.markdown(
-            message["content"]
-        )
-
-
-# ============================================================
-# 12. USER QUESTION
-# ============================================================
-
-question = st.chat_input(
-    "Ask something about your dataset..."
-)
-
-
-# ============================================================
-# 13. RUN AGENT
-# ============================================================
+question = st.chat_input("Ask something about your dataset (e.g., 'Plot the distribution of prices' or 'Show a bar chart of education vs target')...")
 
 if question:
-
-    # -----------------------------
-    # Display user question
-    # -----------------------------
-
-    st.session_state.chat_history.append({
-
-        "role": "user",
-
-        "content": question
-
-    })
-
+    st.session_state.chat_history.append({"role": "user", "content": question})
     with st.chat_message("user"):
-
         st.markdown(question)
 
-
-    # -----------------------------
-    # Agent response
-    # -----------------------------
-
     with st.chat_message("assistant"):
-
-        with st.spinner(
-            "Analyzing your dataset..."
-        ):
-
+        with st.spinner("Analyzing your dataset..."):
             try:
-
-                # Clear any old matplotlib figures
                 plt.close("all")
-
-
-                # -----------------------------
-                # Invoke agent
-                # -----------------------------
-
-                response = agent.invoke(
-                    question
-                )
-
-
-                # -----------------------------
-                # Get final answer
-                # -----------------------------
-
-                answer = response.get(
-                    "output",
-                    "No answer generated."
-                )
-
-
-                # -----------------------------
-                # Display answer
-                # -----------------------------
-
+                response = agent.invoke(question)
+                answer = response.get("output", "No answer generated.")
                 st.markdown(answer)
 
+                # Display any generated matplotlib/seaborn figures
+                if plt.get_fignums():
+                    st.subheader("Generated Visualization")
+                    st.pyplot(plt.gcf(), use_container_width=True)
 
-                # ====================================================
-                # DISPLAY GENERATED VISUALIZATION
-                # ====================================================
-
-                figures = plt.get_fignums()
-
-                if figures:
-
-                    st.subheader(
-                        "Generated Visualization"
-                    )
-
-                    fig = plt.gcf()
-
-                    st.pyplot(
-                        fig,
-                        use_container_width=True
-                    )
-
-
-                # ====================================================
-                # SHOW GENERATED PYTHON CODE
-                # ====================================================
-
-                intermediate_steps = response.get(
-                    "intermediate_steps",
-                    []
-                )
-
-
+                # Show generated Python code steps
+                steps = response.get("intermediate_steps", [])
                 generated_code = []
-
-
-                for step in intermediate_steps:
-
+                for step in steps:
                     try:
-
                         action = step[0]
-
                         tool_input = action.tool_input
-
-
-                        if isinstance(
-                            tool_input,
-                            dict
-                        ):
-
-                            code = tool_input.get(
-                                "query",
-                                ""
-                            )
-
-                        else:
-
-                            code = str(
-                                tool_input
-                            )
-
-
+                        code = tool_input.get("query", "") if isinstance(tool_input, dict) else str(tool_input)
                         if code:
-
-                            generated_code.append(
-                                code
-                            )
-
+                            generated_code.append(code)
                     except Exception:
-
                         pass
 
-
                 if generated_code:
-
-                    with st.expander(
-                        "View Python code generated by Llama"
-                    ):
-
+                    with st.expander("View Python code generated by Llama"):
                         for code in generated_code:
+                            st.code(code, language="python")
 
-                            st.code(
-                                code,
-                                language="python"
-                            )
-
-
-                # -----------------------------
-                # Save assistant message
-                # -----------------------------
-
-                st.session_state.chat_history.append({
-
-                    "role": "assistant",
-
-                    "content": answer
-
-                })
-
+                st.session_state.chat_history.append({"role": "assistant", "content": answer})
 
             except Exception as e:
-
-                st.error(
-                    f"""
-                    Something went wrong.
-
-                    Error:
-                    {e}
-                    """
-                )
+                st.error(f"Something went wrong.\n\nError:\n{e}")
