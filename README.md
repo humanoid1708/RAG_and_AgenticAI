@@ -58,7 +58,7 @@ These projects apply concepts from the modules above. Each has its own setup and
 ### Clone the repository
 
 ```bash
-git clone https://github.com/<your-org>/RAG_and_AgenticAI.git
+git clone https://github.com/humanoid1708/RAG_and_AgenticAI.git
 cd RAG_and_AgenticAI
 ```
 
